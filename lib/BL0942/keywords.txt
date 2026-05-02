@@ -1,0 +1,9 @@
+BL0942	KEYWORD1
+SensorData	KEYWORD2
+ModeConfig	KEYWORD2
+setup	KEYWORD2
+reset	KEYWORD2
+loop	KEYWORD2
+update	KEYWORD2
+onDataReceived	KEYWORD2
+print_registers	KEYWORD2
