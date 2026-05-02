@@ -2,6 +2,7 @@
 
 /*
 State	                            LED
+Provisioning AP active              blinks every 1000 ms
 WiFi Connection in Progress	        blinks every 500 ms
 WiFi Connected, MQTT in Progress	blinks every 250 ms
 WiFi + MQTT Connected	            solid on
@@ -15,10 +16,14 @@ https://www.elektroda.com/news/news4145265.html
 https://www.elektroda.com/news/news3934580.html
 */
 
-ESPOTADASH dash(80);
-PrefsManager ps;
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
+ConfigData    config;
+ESPOTADASH    dash(80);
+PrefsManager  ps;
+ProvisioningServer prov(ps);
+ConfigPortal  portal(config, ps);
+
+WiFiClient    wifiClient;
+PubSubClient  mqttClient(wifiClient);
 
 bl0942::BL0942 energyMeter(Serial1);
 
@@ -67,12 +72,15 @@ void setup()
     // SERIAL SETUP
     Serial.begin(115200);
 
+    // LOAD RUNTIME CONFIG — must happen before any code that uses config fields
+    config.load(ps);
+
     // INIT BL0942 ENERGY METER
     Serial1.begin(4800);
     Serial1.setTimeout(200);
-    bl0942::ModeConfig config;
-    config.ac_freq = bl0942::LINE_FREQUENCY_50HZ;
-    energyMeter.setup(config);
+    bl0942::ModeConfig cfg_bl;
+    cfg_bl.ac_freq = bl0942::LINE_FREQUENCY_50HZ;
+    energyMeter.setup(cfg_bl);
     ps.read("cbu/energy", energyOffset, 0.0f);
     energyMeter.onDataReceived([](bl0942::SensorData &data)
                                {
@@ -84,7 +92,8 @@ void setup()
         sensorFrequency.value = String(data.frequency,            2); });
 
     // INIT ADC
-    temp_sensor.init(ADC_PIN, r_pullup, beta, t_ref, r_ref, v_ref);
+    temp_sensor.init(ADC_PIN, config.ntc_rpull, (int)config.ntc_beta,
+                     config.ntc_tref, config.ntc_rref, config.ntc_vref);
 
     // PIN SETUP
     pinMode(LED_RED, OUTPUT);
@@ -97,15 +106,74 @@ void setup()
     digitalWrite(BRIDGE_FWD, LOW);
     digitalWrite(BRIDGE_REV, LOW);
 
+    // PROVISIONING MODE — entered on first boot or after factory reset
+    if (!config.isProvisioned()) {
+        Serial.println("[MAIN] No config found — entering provisioning mode");
+        prov.begin();
+
+        unsigned long lastBlink    = 0;
+        bool          blinkState   = false;
+        bool          provRelay    = false;
+        bool          lastBtnProv  = HIGH;
+        unsigned long presStart    = 0;
+
+        while (true) {
+            unsigned long now = millis();
+            if (now - lastBlink >= 1000) {
+                lastBlink  = now;
+                blinkState = !blinkState;
+                digitalWrite(LED_BLU, blinkState ? LED_ON : LED_OFF);
+            }
+
+            bool btn = digitalRead(BUTTON);
+            if (btn == LOW && lastBtnProv == HIGH)
+                presStart = now;
+            if (btn == HIGH && lastBtnProv == LOW && presStart > 0) {
+                unsigned long held = now - presStart;
+                if (held >= 15000) {
+                    Serial.println("[BTN] Factory reset");
+                    ps.eraseAll();
+                    delay(200);
+                    ESP.restart();
+                } else if (held >= 5000) {
+                    Serial.println("[BTN] Restart");
+                    delay(100);
+                    ESP.restart();
+                } else if (held >= 50) {
+                    provRelay = !provRelay;
+                    driveRelay(provRelay);
+                    digitalWrite(LED_RED, provRelay ? LED_ON : LED_OFF);
+                }
+                presStart = 0;
+            }
+            lastBtnProv = btn;
+
+            prov.loop();
+            yield();
+        }
+        // Never reached — prov calls ESP.restart() on success.
+    }
+
+    // NORMAL OPERATION -------------------------------------------------------
+
     // INIT HOME ASSISTANT DEVICE AND ENTITIES
-    haDevice.init(mqttClient, DEVICE_HA_PREFIX, DEVICE_VERSION, DEVICE_MANUFACTURER, DEVICE_MODEL, DEVICE_NAME, DEVICE_SN, DEVICE_SUGGESTED_AREA, FIRMWARE_VERSION);
+    haDevice.init(mqttClient,
+                  config.ha_prefix.c_str(),
+                  DEVICE_VERSION,
+                  DEVICE_MANUFACTURER,
+                  DEVICE_MODEL,
+                  config.device_name.c_str(),
+                  config.device_sn.c_str(),
+                  config.device_area.c_str(),
+                  FIRMWARE_VERSION);
+
     relaySwitch.init(haDevice, "Relay", LED_RED);
     sensorVoltage.init(haDevice,   "Voltage",   "V",   "voltage",   "measurement",       2);
     sensorCurrent.init(haDevice,   "Current",   "A",   "current",   "measurement",       3);
     sensorPower.init(haDevice,     "Power",     "W",   "power",     "measurement",       2);
     sensorEnergy.init(haDevice,    "Energy",    "kWh", "energy",    "total_increasing",  3);
     sensorFrequency.init(haDevice, "Frequency", "Hz",  "frequency", "measurement",       2);
-    sensorTemperature.init(haDevice, "Temperature", "°C", "temperature", "measurement",  2);
+    sensorTemperature.init(haDevice, "Temperature", "\xC2\xB0""C", "temperature", "measurement", 2);
     ha_status_topic = haDevice.prefix + "/status";
 
     // Restore relay logical state from what was saved to PrefsManager / LittleFS.
@@ -117,6 +185,9 @@ void setup()
 
     // MQTT SETUP
     mqttConnect();
+
+    // CONFIG PORTAL on port 8080
+    portal.begin();
 
     // SETS ESPOTADASH COMMANDS AND STARTS IT
     dash.addCommand("reboot", "Sofware reset", []()
@@ -139,7 +210,14 @@ void setup()
     dash.addCommand("identify", "Blink blue LED fast for 30 s to identify the device", []()
                     { identifyUntil = millis() + 30000UL; });
 
-    dash.begin(DASHBOARD_URL, haDevice.name, "", FIRMWARE_VERSION);
+    dash.addCommand("reset-energy-counter", "Reset energy counter to zero", []()
+                    {
+                        energyOffset = -lastRawEnergy;
+                        ps.write("cbu/energy", 0.0f);
+                        sensorEnergy.value = "0.0000";
+                        sensorEnergy.publish_state(); });
+
+    dash.begin(config.dashboard_url.c_str(), haDevice.name, "", FIRMWARE_VERSION);
 }
 
 // =======================================================================================================================
@@ -149,6 +227,7 @@ void setup()
 void loop()
 {
     dash.loop();
+    portal.loop();
     handleIdentify();
     mqttClient.loop();
     checkWiFiConnection();
@@ -164,7 +243,7 @@ void loop()
 
     handleButton();
 
-    if (now - lastEnergyPublish >= ENERGY_PUBLISH_INTERVAL)
+    if (now - lastEnergyPublish >= (unsigned long)config.energy_interval)
     {
         lastEnergyPublish = now;
         sensorVoltage.publish_state();
@@ -287,7 +366,10 @@ void checkMQTTConnection()
     if (!mqttClient.connected())
     {
         Serial.println("[MQTT] Disconnected, reconnecting...");
-        if (mqttClient.connect(haDevice.name.c_str(), mqtt_user, mqtt_pass, haDevice.availability_topic.c_str(), 2, true, "offline", true))
+        if (mqttClient.connect(haDevice.name.c_str(),
+                               config.mqtt_user.c_str(),
+                               config.mqtt_pass.c_str(),
+                               haDevice.availability_topic.c_str(), 2, true, "offline", true))
         {
             Serial.println("[MQTT] Reconnected");
             digitalWrite(LED_BLU, LED_ON);
@@ -313,8 +395,8 @@ void WiFiconnect()
     Serial.println("[WiFi] Connecting...");
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
-    WiFi.hostname((String(DEVICE_NAME) + "_" + haDevice.uuid + ".local").c_str());
-    WiFi.begin(wifi_ssid, wifi_password);
+    WiFi.hostname((config.device_name + "_" + haDevice.uuid + ".local").c_str());
+    WiFi.begin(config.wifi_ssid.c_str(), config.wifi_pass.c_str());
     while (WiFi.status() != WL_CONNECTED && attempts < 120)
     {
         delay(500);
@@ -351,9 +433,9 @@ void mqttConnect()
         return;
     }
 
-    Serial.println("[MQTT] Connecting to " + String(MQTT_SERVER) + ":" + String(MQTT_PORT) + "...");
-    mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
-    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+    Serial.println("[MQTT] Connecting to " + config.mqtt_server + ":" + String(config.mqtt_port) + "...");
+    mqttClient.setBufferSize((uint16_t)config.mqtt_buf);
+    mqttClient.setServer(config.mqtt_server.c_str(), (uint16_t)config.mqtt_port);
     mqttClient.setKeepAlive(MQTT_KEEPALIVE);
     mqttClient.setCallback(callback);
 
@@ -363,7 +445,10 @@ void mqttConnect()
         digitalWrite(LED_BLU, bluState);
         delay(250);
         Serial.println("[MQTT] Attempt " + String(attempts + 1) + "/120...");
-        if (mqttClient.connect(haDevice.name.c_str(), mqtt_user, mqtt_pass, haDevice.availability_topic.c_str(), 2, true, "offline", true))
+        if (mqttClient.connect(haDevice.name.c_str(),
+                               config.mqtt_user.c_str(),
+                               config.mqtt_pass.c_str(),
+                               haDevice.availability_topic.c_str(), 2, true, "offline", true))
         {
             Serial.println("[MQTT] Connected");
             digitalWrite(LED_BLU, LED_ON);
@@ -420,8 +505,9 @@ void handleIdentify()
 //
 //  Zone 0  (  0 –  5 s)  no feedback   → release: toggle relay
 //  Zone 1  (  5 – 10 s)  slow blink    → release: restart device
-//  Zone 2  ( 10 – 15 s)  fast blink    → release: reset energy counter
-//  Zone 3  (≥ 15 s)      LED off       → release: erase all namespaces + restart
+//  Zone 2  ( 10 – 15 s)  fast blink    → release: reset WiFi config + restart (captive portal)
+//  Zone 3  (≥ 15 s)      LED off       → release: erase all namespaces (factory reset) + restart
+//                                         On next boot the device enters provisioning mode.
 //
 void handleButton()
 {
@@ -481,11 +567,11 @@ void handleButton()
         }
         else if (held >= 10000)
         {
-            Serial.println("[BTN] Energy counter reset");
-            energyOffset = -lastRawEnergy;
-            ps.write("cbu/energy", 0.0f);
-            sensorEnergy.value = "0.0000";
-            sensorEnergy.publish_state();
+            Serial.println("[BTN] WiFi reset — clearing credentials, entering captive portal on next boot");
+            ps.write("cfg/wifi_ssid", String(""));
+            ps.write("cfg/wifi_pass", String(""));
+            delay(200);
+            ESP.restart();
         }
         else if (held >= 5000)
         {

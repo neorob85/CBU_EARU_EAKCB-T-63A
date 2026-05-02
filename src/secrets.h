@@ -1,13 +1,3 @@
-// =======================================================================================================================
-// WIFI SECRETS
-// =======================================================================================================================
-
-const char *wifi_ssid = CFG_WIFI_SSID;
-const char *wifi_password = CFG_WIFI_PASSWORD;
-
-// =======================================================================================================================
-// MQTT SECRETS
-// =======================================================================================================================
-
-const char *mqtt_user = CFG_MQTT_USER;
-const char *mqtt_pass = CFG_MQTT_PASS;
+// WiFi and MQTT credentials are no longer compile-time constants.
+// They are stored at runtime in PrefsManager (namespace "cfg") and loaded
+// via ConfigData::load(). See src/config.h.

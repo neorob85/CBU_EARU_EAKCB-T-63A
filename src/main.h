@@ -9,19 +9,22 @@
 #include <BL0942.h>
 #include <ntc.h>
 
-#include "secrets.h"
+#include "config.h"
+#include "provisioning.h"
+#include "config_portal.h"
 #include "settings.h"
+#include "secrets.h"
 
 // =======================================================================================================================
 // PINS DEFINITION
 // =======================================================================================================================
 
-const int LED_RED = PIN_P9;
-const int LED_BLU = PIN_P15;
-const int BUTTON = PIN_P17;
+const int LED_RED   = PIN_P9;
+const int LED_BLU   = PIN_P15;
+const int BUTTON    = PIN_P17;
 const int BRIDGE_FWD = PIN_P24;
 const int BRIDGE_REV = PIN_P26;
-const int ADC_PIN = PIN_P23;
+const int ADC_PIN   = PIN_P23;
 
 // =======================================================================================================================
 // PINS LOGIC
@@ -29,5 +32,5 @@ const int ADC_PIN = PIN_P23;
 // =======================================================================================================================
 
 // LED active-LOW: LOW = acceso, HIGH = spento
-#define LED_ON LOW
+#define LED_ON  LOW
 #define LED_OFF HIGH
