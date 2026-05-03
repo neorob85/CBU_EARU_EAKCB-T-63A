@@ -49,6 +49,10 @@ float temperature = 0.0f;
 // Tracks the logical relay state, initialised from saved state after relaySwitch.init().
 bool relayState = false;
 
+// Pending relay command from MQTT callback (deferred to avoid calling publish inside callback).
+bool pendingRelay      = false;
+bool pendingRelayState = false;
+
 // millis() timestamp until which the identify blink is active (0 = inactive).
 unsigned long identifyUntil = 0;
 
@@ -156,6 +160,17 @@ void setup()
 
     // NORMAL OPERATION -------------------------------------------------------
 
+    // Seed RNG: MAC address (device-unique) XORed with ADC noise (thermal entropy)
+    {
+        uint8_t mac[6];
+        WiFi.macAddress(mac);
+        uint32_t seed = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16)
+                      | ((uint32_t)mac[4] <<  8) |  (uint32_t)mac[5];
+        for (int i = 0; i < 8; i++)
+            seed = (seed << 1) ^ (uint32_t)analogRead(ADC_PIN);
+        randomSeed(seed);
+    }
+
     // INIT HOME ASSISTANT DEVICE AND ENTITIES
     haDevice.init(mqttClient,
                   config.ha_prefix.c_str(),
@@ -226,6 +241,12 @@ void setup()
 
 void loop()
 {
+    if (pendingRelay)
+    {
+        pendingRelay = false;
+        setRelay(pendingRelayState);
+    }
+
     dash.loop();
     portal.loop();
     handleIdentify();
@@ -291,7 +312,8 @@ void callback(char *topic, byte *payload, unsigned int length)
     }
     if (t == relaySwitch.command_topic)
     {
-        setRelay(p == "ON");
+        pendingRelay      = true;
+        pendingRelayState = (p == "ON");
     }
 }
 
@@ -604,14 +626,14 @@ void driveRelay(bool active)
     {
         digitalWrite(BRIDGE_REV, LOW);
         digitalWrite(BRIDGE_FWD, HIGH);
-        delay(150);
+        delay(50); // usally is 150 ms, but in same devices this pulse time can be reset the cbu. So I reduce it to 50 ms to avoid unexpected reset.
         digitalWrite(BRIDGE_FWD, LOW);
     }
     else
     {
         digitalWrite(BRIDGE_FWD, LOW);
         digitalWrite(BRIDGE_REV, HIGH);
-        delay(150);
+        delay(50); // usally is 150 ms, but in same devices this pulse time can be reset the cbu. So I reduce it to 50 ms to avoid unexpected reset.
         digitalWrite(BRIDGE_REV, LOW);
     }
 }
